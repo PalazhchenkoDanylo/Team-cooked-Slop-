@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-#aiudaiud
 """
 RFID Attendance System — Raspberry Pi 4B (Ubuntu Server 24.04 LTS)
 
