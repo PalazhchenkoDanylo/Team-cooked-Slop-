@@ -3,7 +3,7 @@
 RFID Attendance System — Raspberry Pi 4B (Ubuntu Server 24.04 LTS)
 
 RC522 wiring (SPI, BCM pin numbering):
-  SS/SDA  ->  GPIO5  (Pin 29)
+  SS/SDA  ->  GPIO8  (Pin 24)  — hardware CE0
   SCK     ->  GPIO11 (Pin 23)
   MOSI    ->  GPIO10 (Pin 19)
   MISO    ->  GPIO9  (Pin 21)
@@ -12,19 +12,17 @@ RC522 wiring (SPI, BCM pin numbering):
   VCC     ->  Pin 17  (3.3 V)
 
 Dependencies:
-  sudo apt update && sudo apt install -y python3-pip python3-dev
-  pip3 install mfrc522 RPi.GPIO spidev
-
-Enable SPI interface:
-  sudo raspi-config  ->  Interface Options -> SPI -> Enable
-  (or manually: add 'dtparam=spi=on' to /boot/firmware/config.txt)
-  sudo reboot
+  sudo apt install -y python3-rpi.gpio python3-spidev
+  sudo python3 -m pip install mfrc522 --break-system-packages
 
 Usage:
   sudo python3 rfid_attendance.py           # normal operation
   sudo python3 rfid_attendance.py --scan    # discover card UIDs
 """
 
+import io
+import logging
+import os
 import signal
 import sqlite3
 import sys
@@ -35,12 +33,37 @@ import RPi.GPIO as GPIO
 from mfrc522 import SimpleMFRC522
 
 # ---------------------------------------------------------------------------
+# Suppress AUTH ERROR spam printed by the mfrc522 library to stdout/stderr.
+# The library uses the root logger and also writes directly to stdout in some
+# versions — redirect both to /dev/null during normal operation.
+# ---------------------------------------------------------------------------
+logging.getLogger().setLevel(logging.CRITICAL)
+
+class _SuppressAuthErrors(io.TextIOBase):
+    """Drop any line that contains known mfrc522 noise."""
+    _NOISE = ("AUTH ERROR", "status2reg")
+
+    def __init__(self, wrapped: io.TextIOBase) -> None:
+        self._wrapped = wrapped
+
+    def write(self, s: str) -> int:
+        if any(tag in s for tag in self._NOISE):
+            return len(s)
+        return self._wrapped.write(s)
+
+    def flush(self) -> None:
+        self._wrapped.flush()
+
+sys.stdout = _SuppressAuthErrors(sys.__stdout__)  # type: ignore[assignment]
+sys.stderr = _SuppressAuthErrors(sys.__stderr__)  # type: ignore[assignment]
+
+# ---------------------------------------------------------------------------
 # Card registry — maps integer UID to (first_name, last_name).
 # Run with --scan to discover the UID of an unknown card.
 # ---------------------------------------------------------------------------
 CARDS: dict[int, tuple[str, str]] = {
-    3840082862: ("Rick",    "Sanchez"),
-    2284718442: ("Antonio", "Margaretti"),
+    584187865769: ("Rick",    "Sanchez"),
+    584189365924: ("Antonio", "Margaretti"),
     3394371378: ("Bibo",    "Bortoleto"),
     2284849230: ("Max",     "Verstappen"),
 }
@@ -48,14 +71,18 @@ CARDS: dict[int, tuple[str, str]] = {
 # Path to the SQLite database file used for persistent event storage.
 DB_FILE = "attendance.db"
 
-# RC522 control pins (BCM numbering).
-# SCK / MOSI / MISO are managed by the hardware SPI driver automatically.
-PIN_RST = 27   # GPIO27 — Pin 13
-PIN_CS  = 5    # GPIO5  — Pin 29 (SS/SDA)
-
 # Minimum interval (seconds) before the same card can trigger another event.
 # Prevents duplicate reads from a single tap.
 DEBOUNCE_SEC = 3
+
+# ANSI color codes for terminal output.
+_GREEN  = "\033[92m"
+_RED    = "\033[91m"
+_YELLOW = "\033[93m"
+_CYAN   = "\033[96m"
+_GRAY   = "\033[90m"
+_BOLD   = "\033[1m"
+_RESET  = "\033[0m"
 
 
 # ---------------------------------------------------------------------------
@@ -106,24 +133,62 @@ def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _clear() -> None:
+    """Clear the terminal screen."""
+    sys.__stdout__.write("\033[2J\033[H")
+    sys.__stdout__.flush()
+
+
+def print_header() -> None:
+    """Print the application header bar."""
+    sys.__stdout__.write(
+        f"\n{_BOLD}{_CYAN}  RFID Attendance System{_RESET}"
+        f"  {_GRAY}{now_str()}{_RESET}\n"
+        f"  {_GRAY}{'─' * 44}{_RESET}\n"
+    )
+    sys.__stdout__.flush()
+
+
 def print_event(full_name: str, event: str, ts: str) -> None:
-    """Print a single attendance event to stdout."""
-    print(f"{ts}  {full_name}  -  {event.upper()}")
+    """Print a colour-coded attendance event to stdout."""
+    if event == "in":
+        color, arrow, label = _GREEN, "→", "IN "
+    else:
+        color, arrow, label = _RED, "←", "OUT"
+    sys.__stdout__.write(
+        f"  {_GRAY}{ts}{_RESET}  "
+        f"{color}{_BOLD}[{label}]{_RESET}  "
+        f"{arrow}  {_BOLD}{full_name}{_RESET}\n"
+    )
+    sys.__stdout__.flush()
 
 
 def print_unknown(uid: int) -> None:
     """Print a warning for an unregistered card UID."""
-    print(f"{now_str()}  Unknown card  -  UID {uid}")
+    sys.__stdout__.write(
+        f"  {_GRAY}{now_str()}{_RESET}  "
+        f"{_YELLOW}{_BOLD}[???]{_RESET}  "
+        f"Unknown card  UID: {uid}\n"
+    )
+    sys.__stdout__.flush()
 
 
 def print_status(conn: sqlite3.Connection) -> None:
     """Print the current attendance status of every registered card holder."""
-    print()
-    for uid, (first, last) in CARDS.items():
+    sys.__stdout__.write(f"\n  {'Name':<22} Status\n")
+    sys.__stdout__.write(f"  {'─'*22} {'─'*8}\n")
+    for _, (first, last) in CARDS.items():
         full = f"{first} {last}"
-        ev = last_event(conn, full) or "absent"
-        print(f"  {full}  -  {ev.upper()}")
-    print()
+        ev = last_event(conn, full)
+        if ev == "in":
+            status = f"{_GREEN}● IN    {_RESET}"
+        elif ev == "out":
+            status = f"{_YELLOW}○ OUT   {_RESET}"
+        else:
+            status = f"{_RED}  ABSENT{_RESET}"
+        sys.__stdout__.write(f"  {full:<22} {status}\n")
+    sys.__stdout__.write("\n")
+    sys.__stdout__.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -137,8 +202,10 @@ def run(conn: sqlite3.Connection) -> None:
     last_uid: int | None = None
     last_scan: float = 0.0
 
-    print("RFID Attendance System - ready. Scan a card...\n")
+    print_header()
     print_status(conn)
+    sys.__stdout__.write(f"  {_GRAY}Waiting for card...{_RESET}\n\n")
+    sys.__stdout__.flush()
 
     try:
         while True:
@@ -185,14 +252,20 @@ def run(conn: sqlite3.Connection) -> None:
 def scan_mode() -> None:
     """Read and display card UIDs without recording any attendance events."""
     reader = SimpleMFRC522()
-    print("Scan mode - present cards to discover their UIDs. Press Ctrl+C to exit.\n")
+    sys.__stdout__.write(
+        f"\n{_BOLD}{_CYAN}  Scan Mode{_RESET}"
+        f"  {_GRAY}present cards to discover their UIDs  |  Ctrl+C to exit{_RESET}\n"
+        f"  {_GRAY}{'─' * 54}{_RESET}\n\n"
+    )
+    sys.__stdout__.flush()
     seen: set[int] = set()
     try:
         while True:
             uid, _ = reader.read_no_block()
             if uid and uid not in seen:
                 seen.add(uid)
-                print(f"  UID: {uid}")
+                sys.__stdout__.write(f"  UID: {_CYAN}{_BOLD}{uid}{_RESET}\n")
+                sys.__stdout__.flush()
             time.sleep(0.2)
     finally:
         GPIO.cleanup()
@@ -211,7 +284,7 @@ def main() -> None:
 
     # Gracefully handle Ctrl+C: print a final status summary before exiting.
     def _handle_sigint(sig, frame):
-        print("\nShutting down...")
+        sys.__stdout__.write(f"\n{_BOLD}  Shutting down...{_RESET}\n")
         print_status(conn)
         conn.close()
         sys.exit(0)
