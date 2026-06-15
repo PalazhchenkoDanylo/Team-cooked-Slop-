@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 *.pyo
 *.db
+authorized_keys.txt

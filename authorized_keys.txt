@@ -1,7 +1,0 @@
-# One RFID tag per line, exactly as Pico prints it.
-# Example:
-# 04AABBCCDD
-59507E11,A
-88046105,Mohammad
-88044F6A,C
-8804664E,D
