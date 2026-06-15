@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RFID Gateway Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f4f6f9; padding-top: 30px; font-family: system-ui, -apple-system, sans-serif; }
+        .status-banner {
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            font-weight: 800;
+            font-size: 1.6rem;
+            margin-bottom: 25px;
+            text-transform: uppercase;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+        .enabled { background-color: #d1e7dd; color: #0f5132; border: 2px solid #badbcc; }
+        .locked { background-color: #f8d7da; color: #842029; border: 2px solid #f5c2c7; }
+        .table-wrapper { background: white; padding: 25px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); margin-bottom: 30px; }
+        h4 { font-weight: 700; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="gateway-status" class="status-banner locked">
+            GATEWAY DISABLED (No Active Session)
+        </div>
+
+        <div class="table-wrapper">
+            <h4 class="mb-3 text-primary">Active Session</h4>
+            <table class="table align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>Card Signature / Username</th>
+                        <th>Session Start Time</th>
+                    </tr>
+                </thead>
+                <tbody id="active-users-body">
+                    </tbody>
+            </table>
+        </div>
+
+        <div class="table-wrapper">
+            <h4 class="mb-3 text-secondary">System Event Logs</h4>
+            <table class="table table-hover align-middle">
+                <thead class="table-dark">
+                    <tr>
+                        <th>User ID / Name</th>
+                        <th>Event Time</th>
+                        <th>Status</th>
+                        <th>Duration / Reason</th>
+                    </tr>
+                </thead>
+                <tbody id="history-body">
+                    </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        function updateDashboard() {
+            fetch('/api/data')
+                .then(response => response.json())
+                .then(data => {
+                    const statusBanner = document.getElementById('gateway-status');
+                    const activeBody = document.getElementById('active-users-body');
+                    const historyBody = document.getElementById('history-body');
+
+                    // 1. Manage Dynamic State Status Banner
+                    if (data.active.length > 0) {
+                        statusBanner.className = 'status-banner enabled';
+                        statusBanner.innerText = `GATEWAY ENABLED (Active Lock: ${data.active[0].name})`;
+                    } else {
+                        statusBanner.className = 'status-banner locked';
+                        statusBanner.innerText = 'GATEWAY DISABLED (System Clear)';
+                    }
+
+                    // 2. Render Active Users Section
+                    activeBody.innerHTML = '';
+                    if (data.active.length === 0) {
+                        activeBody.innerHTML = '<tr><td colspan="2" class="text-center text-muted py-3">None</td></tr>';
+                    } else {
+                        data.active.forEach(user => {
+                            activeBody.innerHTML += `<tr>
+                                <td><span class="badge bg-primary fs-6">${user.name}</span></td>
+                                <td><strong>${user.login_time}</strong></td>
+                            </tr>`;
+                        });
+                    }
+
+                    // 3. Render Historical Data & Rejections List
+                    historyBody.innerHTML = '';
+                    if (data.history.length === 0) {
+                        historyBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3">No recorded transaction history found.</td></tr>';
+                    } else {
+                        data.history.forEach(session => {
+                            // Check if this was a rejected attempt
+                            let isRejected = session.logout_time === 'REJECTED';
+                            
+                            // Dynamically assign red styling if rejected
+                            let rowClass = isRejected ? 'table-danger' : '';
+                            let badgeClass = isRejected ? 'bg-danger' : 'bg-dark';
+                            let statusText = isRejected ? '<span class="fw-bold text-danger">ACCESS DENIED</span>' : 'Logged Out: ' + session.logout_time;
+
+                            historyBody.innerHTML += `<tr class="${rowClass}">
+                                <td><strong>${session.name}</strong></td>
+                                <td>${session.login_time}</td>
+                                <td>${statusText}</td>
+                                <td><span class="badge ${badgeClass} font-monospace">${session.duration}</span></td>
+                            </tr>`;
+                        });
+                    }
+                })
+                .catch(error => console.error('API Pull Error:', error));
+        }
+
+        // Asynchronously poll the local SQLite data wrapper every 2000ms
+        setInterval(updateDashboard, 2000);
+        updateDashboard();
+    </script>
+</body>
+</html>
