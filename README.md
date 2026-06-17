@@ -1,14 +1,57 @@
-# RFID Wi-Fi Gateway
+# RFID VPN Gateway
 
-Terminal UI for a Raspberry Pi that works as a physical gateway between a computer on Ethernet and Wi-Fi. An RFID tag toggles traffic forwarding on and off.
+Hardware-controlled network gateway built on a **Raspberry Pi 4** and a **Raspberry Pi Pico**. Network access is controlled by RFID cards: an authorized card enables routing, activates a WireGuard VPN tunnel, and allows clients to access the Internet through Pi-hole DNS filtering.
 
-## Hardware
+## Architecture
 
-- Raspberry Pi connected to Wi-Fi.
-- Computer connected to the Pi by Ethernet.
-- RFID reader/Pico connected to the Pi over serial, for example `/dev/ttyACM0`.
+```plaintext
+[ RFID Card ]
+      │
+      ▼
+[ Raspberry Pi Pico ]
+      │ USB Serial (/dev/ttyACM0)
+      ▼
+[ Raspberry Pi 4 ]
+      │
+      ├─ RFID Gateway Service
+      │    ├─ Validates RFID tags
+      │    ├─ Manages gateway state
+      │    ├─ Controls firewall and routing
+      │    └─ Starts/stops WireGuard
+      │
+      ├─ Pi-hole (DNS filtering)
+      │
+      └─ WireGuard VPN (wg0)
+               │
+               ▼
+           Internet
+```
 
-## Setup
+### Components
+
+* **Raspberry Pi Pico** reads RFID tags and sends them to the Pi over USB serial (`/dev/ttyACM0`).
+* **RFID Gateway Service** (`rfid_gateway.py`) monitors RFID events, validates authorized cards, and controls network access.
+* **WireGuard** provides secure outbound connectivity.
+* **Pi-hole** filters advertisements, trackers, and unwanted domains.
+* **Flask Dashboard** (`app.py`) displays gateway status by reading data from a shared SQLite database (`gateway.db`).
+
+## Requirements
+
+### Hardware
+
+* Raspberry Pi 4
+* Raspberry Pi Pico
+* RFID reader connected to the Pico
+* Network uplink (Wi-Fi or hotspot)
+* Client connected through the Pi
+
+### Software
+
+* Python 3
+* WireGuard
+* Pi-hole (optional but recommended)
+
+## Installation
 
 ```bash
 python3 -m venv .venv
@@ -16,7 +59,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Edit `gateway.ini` if your interfaces or serial port are different:
+## Configuration
+
+Edit `gateway.ini`:
 
 ```ini
 [rfid]
@@ -26,9 +71,10 @@ port = /dev/ttyACM0
 [network]
 lan_interface = eth0
 wifi_interface = wlan0
+vpn_interface = wg0
 ```
 
-If another script writes the last RFID tag into a file, use file mode:
+If RFID data is provided by another process:
 
 ```ini
 [rfid]
@@ -36,30 +82,94 @@ source = file
 file_path = /tmp/rfid_tag
 ```
 
-Put allowed RFID values into `authorized_keys.txt`, one key per line. The value must match exactly what the Pico prints over serial.
+Authorized RFID values are stored in:
 
-## Run
+```text
+authorized_keys.txt
+```
 
-Firewall and forwarding changes require root:
+One RFID value per line. Values must match the data received from the Pico.
+
+### WireGuard Example
+
+`/etc/wireguard/wg0.conf`
+
+```ini
+[Interface]
+PrivateKey = YOUR_PRIVATE_KEY
+Address = 10.2.0.2/32
+DNS = 10.2.0.1
+
+[Peer]
+PublicKey = VPN_PROVIDER_PUBLIC_KEY
+Endpoint = VPN_SERVER:51820
+AllowedIPs = 0.0.0.0/0
+```
+
+## Running
+
+Root privileges are required because the application modifies:
+
+* `iptables`
+* `sysctl net.ipv4.ip_forward`
+* WireGuard interfaces
 
 ```bash
 sudo .venv/bin/python rfid_gateway.py
 ```
 
-If you run `python rfid_gateway.py` without `sudo`, the UI can still open and read RFID tags, but traffic toggling will fail because Linux does not allow an ordinary user to change `net.ipv4.ip_forward` or `iptables`.
+The web dashboard can be started separately:
 
-The UI is fullscreen in the terminal:
+```bash
+python app.py
+```
 
-- `q` exits
-- `r` reloads `authorized_keys.txt`
-- `t` toggles traffic manually for testing
+Default dashboard address:
+
+```text
+http://localhost:5000
+```
+
+## Operation
+
+### Authorized RFID Card
+
+When a valid RFID card is presented:
+
+1. The card is validated against `authorized_keys.txt`.
+2. IP forwarding is enabled.
+3. Firewall rules are applied.
+4. WireGuard (`wg0`) is started.
+5. Client traffic is routed through the VPN.
+6. DNS requests are filtered by Pi-hole.
+
+### Unauthorized RFID Card
+
+Unauthorized cards are ignored and do not affect an active session.
+
+### Session End
+
+When access is revoked:
+
+1. WireGuard is stopped.
+2. Gateway firewall rules are removed.
+3. IP forwarding is disabled.
+4. Internet access through the gateway is blocked.
 
 ## Network Behavior
 
-When enabled, the app sets `net.ipv4.ip_forward=1` and adds these rules:
+When enabled:
 
-- forward `eth0 -> wlan0`
-- allow established return traffic `wlan0 -> eth0`
-- NAT/MASQUERADE through `wlan0`
+* `net.ipv4.ip_forward = 1`
+* Forwarding from LAN to uplink interface
+* Return traffic allowed
+* NAT/MASQUERADE enabled
+* Traffic routed through WireGuard VPN
 
-When disabled, it removes only those exact `iptables` rules. It does not change your Wi-Fi connection or DHCP settings.
+When disabled:
+
+* Gateway-specific firewall rules are removed
+* IP forwarding is disabled
+* VPN tunnel is stopped
+
+The application only modifies rules created by the gateway and does not alter existing network configuration outside its scope.
