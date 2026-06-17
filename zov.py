@@ -1,1 +1,0 @@
-goyda zov

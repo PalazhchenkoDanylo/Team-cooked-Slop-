@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from rfid_gateway import main
+from LAST_CHANCE import main
 
 
 if __name__ == "__main__":
